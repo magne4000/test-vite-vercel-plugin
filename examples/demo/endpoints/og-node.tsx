@@ -1,15 +1,17 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { Readable } from "node:stream";
-import type { ReadableStream } from "node:stream/web";
-import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ImageResponse } from "@vercel/og";
 import React from "react";
 
-const font = readFileSync(join(__dirname, "./Roboto-Regular.ttf"));
+// isomorphic __dirname
+const _dirname = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
+const font = readFileSync(join(_dirname, "./Roboto-Regular.ttf"));
 
-export default async function handler(request: VercelRequest, response: VercelResponse) {
-  const resp = new ImageResponse(
+// This is a Universal Handler
+// See https://universal-middleware.dev/definitions#handler
+export default async function handler(request: Request) {
+  return new ImageResponse(
     <div
       style={{
         fontFamily: "Roboto",
@@ -40,6 +42,4 @@ export default async function handler(request: VercelRequest, response: VercelRe
       ],
     },
   );
-
-  Readable.fromWeb(resp.body as ReadableStream).pipe(response);
 }

@@ -1,5 +1,5 @@
 import type { Config } from "vike/types";
 
 export default {
-  isr: true,
+  isr: { expiration: 10 },
 } satisfies Config;

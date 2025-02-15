@@ -1,5 +1,4 @@
 import type { Config } from "vike/types";
-import config from "@vite-plugin-vercel/vike/config";
 
 // https://vike.dev/config
 export default {
@@ -33,5 +32,4 @@ export default {
       },
     },
   },
-  extends: config,
 } satisfies Config;

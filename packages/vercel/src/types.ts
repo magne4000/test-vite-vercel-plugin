@@ -49,7 +49,9 @@ export interface ViteVercelConfig {
    */
   defaultSupportsResponseStreaming?: boolean;
   /**
-   * TODO
+   * Use `getEntriesFromFs` for mapping your filesystem routes to entries.
+   * If you are interfacing this plugin with a framework, entries can also be added through the api
+   * @todo API example
    */
   entries?: ViteVercelEntry[];
   /**

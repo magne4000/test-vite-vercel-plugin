@@ -4,6 +4,7 @@ import { teardown as _teardown } from "../common/teardown";
 import react from "@vitejs/plugin-react-swc";
 import vercel from "vite-plugin-vercel";
 import { getTmpDir } from "../common/utils";
+import vike from "vike/plugin";
 import { getEntriesFromFs } from "vite-plugin-vercel/utils";
 
 const dirname = path.basename(__dirname);
@@ -14,6 +15,7 @@ export const setup = _setup(dirname, {
   root: process.cwd(),
   plugins: [
     react(),
+    vike(),
     vercel({
       outDir: getTmpDir(dirname),
       entries: [
@@ -34,16 +36,6 @@ export const setup = _setup(dirname, {
       ],
     }),
   ],
-  vercel: {
-    prerender() {
-      return {
-        ssr: {
-          path: "ssr_",
-        },
-      };
-    },
-    distContainsOnlyStatic: false,
-  },
 });
 
 export const teardown = _teardown(dirname);
