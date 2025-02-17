@@ -51,7 +51,7 @@
     "@brillout/libassert": "^0.5.8",
     "@manypkg/find-root": "^2.2.3",
     "@universal-middleware/vercel": "^0.4.0",
-    "@vercel/build-utils": "^9.2.0",
+    "@vercel/build-utils": "^10.1.0",
     "@vercel/fun": "^1.1.2",
     "@vercel/nft": "^0.29.1",
     "@vercel/node": "^5.1.0",

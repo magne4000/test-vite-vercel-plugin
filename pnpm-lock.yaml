@@ -86,8 +86,8 @@ importers:
         specifier: ^0.4.0
         version: 0.4.0(hono@4.6.20)
       '@vercel/build-utils':
-        specifier: ^9.2.0
-        version: 9.2.0
+        specifier: ^10.1.0
+        version: 10.1.0
       '@vercel/fun':
         specifier: ^1.1.2
         version: 1.1.2
@@ -899,6 +899,9 @@ packages:
 
   '@universal-middleware/vercel@0.4.0':
     resolution: {integrity: sha512-OPq3vyB0izXEj/SHFRp6usc5/RSS7sO64tqq3JC3UkQoGe502gAKMBFRTmWIRIBvpASPxZTfOxw9KZWsVA8COw==}
+
+  '@vercel/build-utils@10.1.0':
+    resolution: {integrity: sha512-JPff3brfZx0mTl+0Cmzz220MmnTSYnBgVqVvT6a8lVALJHr75sKaNxZy0/hWZe8ev+w2JwLGMmJwP2TKHtKeHA==}
 
   '@vercel/build-utils@9.2.0':
     resolution: {integrity: sha512-e6S+gj+UNsaWH93fRF59HDhNbEypqQlOFJWJcrjrxodmLReXs9lHaYrouPVt3O/3wrQPY1GYKAH7lonQ39Op3Q==}
@@ -2882,6 +2885,8 @@ snapshots:
       - fastify
       - h3
       - hono
+
+  '@vercel/build-utils@10.1.0': {}
 
   '@vercel/build-utils@9.2.0': {}
 
