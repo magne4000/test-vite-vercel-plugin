@@ -6,6 +6,6 @@ export function assert(condition: unknown, errorMessage: string): asserts condit
     return;
   }
 
-  const err = newError(`["vite-plugin-vercel"] ${errorMessage}`, 2);
+  const err = newError(`[vike-vercel] ${errorMessage}`, 2);
   throw err;
 }

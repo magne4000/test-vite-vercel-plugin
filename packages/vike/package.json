@@ -1,0 +1,51 @@
+{
+  "name": "vike-vercel",
+  "version": "1.0.0",
+  "type": "module",
+  "files": [
+    "dist",
+    "*.d.ts"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./plugins": {
+      "import": "./dist/plugins.js",
+      "require": "./dist/plugins.cjs"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    }
+  },
+  "types": "./index.d.ts",
+  "description": "Vercel extension for Vike",
+  "author": "Joël Charles <joel.charles91@gmail.com>",
+  "repository": "https://github.com/magne4000/vite-plugin-vercel",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "prepack": "rm -rf dist && pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "vite": ">=6",
+    "vite-plugin-vercel": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.74",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vite-plugin-vercel": "workspace:^"
+  },
+  "dependencies": {
+    "@brillout/libassert": "^0.5.8",
+    "vike": "file:../../../vike/vike"
+  }
+}

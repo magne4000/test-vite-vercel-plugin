@@ -4,28 +4,32 @@ import { createMiddleware } from "@universal-middleware/express";
 import { getNodeVersion } from "@vercel/build-utils";
 import type { NodeVersion } from "@vercel/build-utils/dist";
 import { getTransformedRoutes, type RouteWithSrc } from "@vercel/routing-utils";
-import type { EmittedFile } from "rollup";
+import { match } from "path-to-regexp";
+import type { EmittedFile, PluginContext } from "rollup";
 import {
   BuildEnvironment,
   createRunnableDevEnvironment,
+  type Environment,
   type EnvironmentOptions,
   isRunnableDevEnvironment,
   mergeConfig,
-  normalizePath,
   type Plugin,
   type PluginOption,
-  type ResolvedConfig,
 } from "vite";
+import { createAPI, vercelBuildApp, type ViteVercelOutFile } from "./api";
+import { assert } from "./assert";
 import { getVcConfig } from "./build";
 import { getConfig } from "./config";
-import { copyDir, getOutput, getPublic } from "./helpers";
-import { disableChunks } from "./plugins/disable-chunks";
+import { joinAbsolute } from "./helpers";
+import { bundlePlugin } from "./plugins/bundle";
+import { vercelCleanupPlugin } from "./plugins/clean-outdir";
+import { wasmPlugin } from "./plugins/wasm";
 import { vercelOutputPrerenderConfigSchema } from "./schemas/config/prerender-config";
-import type { ViteVercelConfig, ViteVercelEntry, ViteVercelPrerenderRoute } from "./types";
+import type { ViteVercelConfig, ViteVercelEntry, ViteVercelRouteOverrides } from "./types";
 
 export * from "./types";
 
-const outDir = path.join(".vercel", "output");
+const outDir = ".vercel/output";
 const DUMMY = "__DUMMY__";
 
 function createVercelEnvironmentOptions(
@@ -47,7 +51,7 @@ function createVercelEnvironmentOptions(
         createEnvironment(name, config) {
           return new BuildEnvironment(name, config);
         },
-        outDir,
+        outDir: path.posix.join(outDir, "_tmp"),
         copyPublicDir: false,
         rollupOptions: {
           input,
@@ -76,6 +80,8 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
   const resolvedVirtualEntry = "\0virtual:vite-plugin-vercel:entry";
   let nodeVersion: NodeVersion;
   const filesToEmit: Record<string, EmittedFile[]> = { vercel_client: [] };
+  const entries = pluginConfig.entries ?? [];
+  const outfiles: ViteVercelOutFile[] = [];
 
   return {
     name: "vite-plugin-vercel",
@@ -84,16 +90,19 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
       nodeVersion = await getNodeVersion(process.cwd());
     },
 
+    api(pluginContext?: PluginContext) {
+      return createAPI(entries, outfiles, pluginConfig, pluginContext);
+    },
+
     applyToEnvironment(env) {
       return env.name === "vercel_node" || env.name === "vercel_edge" || env.name === "vercel_client";
     },
 
     config(config, env) {
-      const entries = pluginConfig.entries ?? [];
       const outDirOverride: EnvironmentOptions = pluginConfig.outDir
         ? {
             build: {
-              outDir: pluginConfig.outDir,
+              outDir: path.posix.join(pluginConfig.outDir, "_tmp"),
             },
           }
         : {};
@@ -115,11 +124,17 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
 
       const environments: Record<string, EnvironmentOptions> = {};
 
-      // TODO API ideas for frameworks: Custom hooks?
-      //  or public API: https://github.com/vitejs/vite/discussions/6257#discussioncomment-1870069
-
       // vercel_edge
       if (Object.keys(inputs.edge).length > 0) {
+        // See https://vercel.com/docs/functions/runtimes/edge#compatible-node.js-modules
+        const external = ["async_hooks", "events", "buffer", "assert", "util"];
+        // In dev, we're running on node env, so we do not apply edge conditions
+        const conditions =
+          env.command === "build"
+            ? {
+                conditions: ["edge-light", "worker", "browser", "module", "import", "require"],
+              }
+            : {};
         filesToEmit.vercel_edge = [];
         environments.vercel_edge = createVercelEnvironmentOptions(
           inputs.edge,
@@ -127,16 +142,15 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
           mergeConfig<EnvironmentOptions, EnvironmentOptions>(
             {
               resolve: {
-                conditions: ["edge-light", "worker", "browser", "module", "import", "require"],
+                external: [...external, ...external.map((e) => `node:${e}`)],
+                ...conditions,
               },
               optimizeDeps: {
+                ...config.optimizeDeps,
                 esbuildOptions: {
                   target: "es2022",
                   format: "esm",
                 },
-              },
-              build: {
-                emptyOutDir: true,
               },
             },
             outDirOverride,
@@ -156,9 +170,8 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
         "mjs",
         mergeConfig<EnvironmentOptions, EnvironmentOptions>(
           {
-            build: {
-              // Ensure that outDir is emptied only once
-              emptyOutDir: !("vercel_edge" in environments),
+            optimizeDeps: {
+              ...config.optimizeDeps,
             },
           },
           outDirOverride,
@@ -179,33 +192,7 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
         // equivalent to --app CLI option
         builder: {
           buildApp: async (builder) => {
-            const priority: Record<string, number> = {
-              vercel_edge: 1,
-              vercel_node: 2,
-              vercel_client: 3,
-            }; // Higher priority values should be at the end
-
-            const envs = Object.values(builder.environments);
-            envs.sort((a, b) => {
-              const aPriority = priority[a.name] ?? 0;
-              const bPriority = priority[b.name] ?? 0;
-
-              return aPriority - bPriority;
-            });
-
-            // console.log(
-            //   "buildApp",
-            //   envs.map((e) => e.name),
-            // );
-
-            for (const environment of envs) {
-              // console.log("buildApp", environment.name);
-              await builder.build(environment);
-              // FIXME: Vike seems to process.exit(0) when { prerender: true }
-              // console.log("buildApp", environment.name, "END");
-            }
-
-            // console.log("buildApp", "END");
+            await vercelBuildApp(builder);
           },
         },
         environments,
@@ -213,63 +200,94 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
     },
 
     // TODO watch/hmr
-    configureServer(server) {
-      const transformedRoutes = getTransformedRoutes({
-        rewrites: pluginConfig.entries?.map((entry) => ({
-          source: typeof entry.route === "string" ? `(${entry.route})` : entryToPathtoregex(entry),
-          destination: entry.destination,
-        })),
-      });
+    configureServer: {
+      order: "post",
+      handler(server) {
+        const transformedRoutes = getTransformedRoutes({
+          rewrites: entries.map((entry) => ({
+            source: typeof entry.route === "string" ? `(${entry.route})` : entryToPathtoregex(entry),
+            destination: entry.destination,
+          })),
+        });
 
-      const routes = (transformedRoutes.routes ?? [])
-        .filter((r): r is RouteWithSrc => Boolean(r.src))
-        .map((r) => ({
-          src: new RegExp(r.src),
-          dest: r.dest,
-          entry: pluginConfig.entries?.find((e) => e.destination === r.dest),
-        }));
-
-      // This middleware is in charge of adding user-provided headers onto the Response
-      const routesWithAddedHeaders = routes.filter((r) => r.entry?.headers);
-      if (routesWithAddedHeaders.length > 0) {
-        server.middlewares.use(
-          createMiddleware(() => async (request) => {
-            return (response) => {
-              const url = new URL(request.url);
-              for (const r of routesWithAddedHeaders) {
-                if (r.entry?.headers && r.src.test(url.pathname)) {
-                  for (const [key, value] of Object.entries(r.entry.headers)) response.headers.set(key, value);
-                }
-              }
-              return response;
+        const routes = (transformedRoutes.routes ?? [])
+          .filter((r): r is RouteWithSrc => Boolean(r.src))
+          .map((r) => {
+            const entry = entries.find((e) => e.destination === r.dest?.split("?")[0]);
+            return {
+              src: new RegExp(r.src),
+              dest: r.dest,
+              entry: entries.find((e) => e.destination === r.dest?.split("?")[0]),
+              re: entry
+                ? typeof entry.route === "string"
+                  ? (str: string) => str.match(entry.route as string)
+                  : match(entryToPathtoregex(entry))
+                : null,
             };
-          })(),
-        );
-      }
+          });
 
-      // This middleware is in charge of mapping a request to a UniversalHandler
-      server.middlewares.use(
-        createMiddleware(() => async (request) => {
-          const url = new URL(request.url);
-          for (const r of routes) {
-            if (r.entry && r.src.test(url.pathname)) {
-              const devEnv = r.entry.edge ? server.environments.vercel_edge : server.environments.vercel_node;
-
-              if (isRunnableDevEnvironment(devEnv)) {
-                const newRequest = request.clone();
-                if (r.entry.headers) {
-                  for (const [key, value] of Object.entries(r.entry.headers)) newRequest.headers.set(key, value);
-                }
-
-                const fileEntry = await devEnv.runner.import(r.entry.input);
-                return fileEntry.default(newRequest);
-              }
-
-              throw new Error(`${devEnv.name} environment is not Runnable`);
-            }
+        // Inject Post Middleware that executes AFTER Vite's internal middlewares
+        return () => {
+          const routesWithAddedHeaders = routes.filter((r) => r.entry?.headers);
+          if (routesWithAddedHeaders.length > 0) {
+            // This middleware is in charge of adding user-provided headers onto the Response
+            server.middlewares.use(
+              createMiddleware(() => async (request) => {
+                return (response) => {
+                  const url = new URL(request.url);
+                  for (const r of routesWithAddedHeaders) {
+                    if (r.entry?.headers && r.src.test(url.pathname)) {
+                      for (const [key, value] of Object.entries(r.entry.headers)) response.headers.set(key, value);
+                    }
+                  }
+                  return response;
+                };
+              })(),
+            );
           }
-        })(),
-      );
+
+          // This middleware is in charge of resolving Vercel entries
+          server.middlewares.use(
+            createMiddleware(() => async (request, ctx, runtime) => {
+              const url = new URL(request.url);
+
+              for (const r of routes) {
+                const found = r.re?.(url.pathname);
+                if (r.entry && found) {
+                  const devEnv = r.entry.edge ? server.environments.vercel_edge : server.environments.vercel_node;
+
+                  if (isRunnableDevEnvironment(devEnv)) {
+                    const newRequest = request.clone();
+                    if (r.entry.headers) {
+                      for (const [key, value] of Object.entries(r.entry.headers)) newRequest.headers.set(key, value);
+                    }
+
+                    // FIXME: extract params for entries with `entry.route` regex
+                    const params = "params" in found ? found.params : {};
+
+                    // Add 'x-now-route-matches' header
+                    request.headers.set(
+                      "x-now-route-matches",
+                      new URLSearchParams(params as Record<string, string>).toString(),
+                    );
+                    // patch `runtime.params` because its computing is based on 'x-now-route-matches' header
+                    // which we just added.
+                    runtime.params = params as Record<string, string>;
+
+                    // Other internal headers are listed here if we need future support
+                    // https://github.com/vercel/next.js/blob/c994df87a55c1912a99b4ca25cd5d5d5790c1dac/packages/next/src/server/lib/server-ipc/utils.ts#L42
+
+                    const fileEntry = await devEnv.runner.import(r.entry.input);
+                    return fileEntry.default(newRequest, ctx, runtime);
+                  }
+
+                  throw new Error(`${devEnv.name} environment is not Runnable`);
+                }
+              }
+            })(),
+          );
+        };
+      },
     },
 
     resolveId(id) {
@@ -278,7 +296,7 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
       }
     },
 
-    load(id) {
+    async load(id) {
       if (id.startsWith(resolvedVirtualEntry)) {
         if (id.includes(DUMMY)) {
           return "export default {};";
@@ -286,9 +304,9 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
 
         const isEdge = this.environment.name === "vercel_edge";
         const fn = isEdge ? "createEdgeHandler" : "createNodeHandler";
-        const [, , , input] = id.split(":");
+        const [, , , ..._input] = id.split(":");
+        const input = _input.join(":");
 
-        const entries = pluginConfig.entries ?? [];
         const entry = entries.find((e) => e.input === input);
 
         if (!entry) {
@@ -342,14 +360,15 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
           }
         }
 
-        const absoluteInput = normalizePath(
-          path.isAbsolute(input) ? input : path.posix.join(this.environment.config.root, input),
-        );
+        const resolved = await this.resolve(input, undefined, {
+          isEntry: true,
+        });
+        assert(resolved, `Failed to resolve input ${input}`);
 
         //language=javascript
         return `
           import { ${fn} } from "vite-plugin-vercel/universal-middleware";
-          import handler from "${absoluteInput}";
+          import handler from "${resolved.id}";
 
           export default ${fn}(() => handler)();
         `;
@@ -371,7 +390,7 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
         }
 
         // Compute overrides for static HTML files
-        const userOverrides = await computeStaticHtmlOverrides(this.environment.config);
+        const userOverrides = await computeStaticHtmlOverrides(this.environment);
         // Update overrides with static files paths
         pluginConfig.config ??= {};
         pluginConfig.config.overrides ??= {};
@@ -385,46 +404,70 @@ function vercelPlugin(pluginConfig: ViteVercelConfig): Plugin {
             source: JSON.stringify(getConfig(pluginConfig), undefined, 2),
           });
         }
-
-        if (this.environment.name === "vercel_client") {
-          await copyDistToStatic(this.environment.config);
-        }
       },
+    },
+
+    // Compute outfiles for the API
+    writeBundle(_opts, bundle) {
+      if (this.environment.name !== "vercel_edge" && this.environment.name !== "vercel_node") return;
+
+      const entryMap = new Map(entries.map((e) => [`${path.posix.join("functions/", e.destination)}.func/index`, e]));
+
+      for (const [key, value] of Object.entries(bundle)) {
+        if (value.type === "chunk" && value.isEntry && entryMap.has(removeExtension(key))) {
+          outfiles.push({
+            type: "chunk",
+            root: this.environment.config.root,
+            outdir: this.environment.config.build.outDir,
+            filepath: key,
+            // biome-ignore lint/style/noNonNullAssertion: guarded by entryMap.has(...)
+            relatedEntry: entryMap.get(removeExtension(key))!,
+          });
+        } else if ((value.type === "asset" && key.startsWith("functions/")) || key === "config.json") {
+          outfiles.push({
+            type: "asset",
+            root: this.environment.config.root,
+            outdir: this.environment.config.build.outDir,
+            filepath: key,
+          });
+        }
+      }
     },
 
     sharedDuringBuild: true,
   };
 }
 
-async function copyDistToStatic(resolvedConfig: ResolvedConfig) {
-  if (resolvedConfig.vercel?.distContainsOnlyStatic) {
-    await copyDir(resolvedConfig.build.outDir, getOutput(resolvedConfig, "static"));
-  }
+function removeExtension(subject: string) {
+  return subject.replace(/\.[^/.]+$/, "");
 }
 
-async function computeStaticHtmlOverrides(
-  resolvedConfig: ResolvedConfig,
-): Promise<NonNullable<ViteVercelPrerenderRoute>> {
-  const staticAbsolutePath = getOutput(resolvedConfig, "static");
-  const files = await getStaticHtmlFiles(staticAbsolutePath);
+async function computeStaticHtmlOverrides(env: Environment): Promise<NonNullable<ViteVercelRouteOverrides>> {
+  if (env.name === "vercel_client") {
+    const outDir = joinAbsolute(env, env.config.build.outDir);
+    // public files copied by vite by default https://vitejs.dev/guide/assets.html#the-public-directory
+    const copyPublicDir = env.getTopLevelConfig().build.copyPublicDir;
+    if (copyPublicDir) {
+      const publicDir = env.getTopLevelConfig().publicDir;
+      const publicFiles = await getStaticHtmlFiles(publicDir);
+      const files = publicFiles.map((f) => f.replace(publicDir, outDir));
 
-  // public files copied by vite by default https://vitejs.dev/guide/assets.html#the-public-directory
-  const publicDir = getPublic(resolvedConfig);
-  const publicFiles = await getStaticHtmlFiles(publicDir);
-  files.push(...publicFiles.map((f) => f.replace(publicDir, staticAbsolutePath)));
+      return files.reduce(
+        (acc, curr) => {
+          const relPath = path.relative(outDir, curr);
+          const parsed = path.parse(relPath);
+          const pathJoined = path.join(parsed.dir, parsed.name);
+          acc[relPath] = {
+            path: pathJoined,
+          };
+          return acc;
+        },
+        {} as NonNullable<ViteVercelRouteOverrides>,
+      );
+    }
+  }
 
-  return files.reduce(
-    (acc, curr) => {
-      const relPath = path.relative(staticAbsolutePath, curr);
-      const parsed = path.parse(relPath);
-      const pathJoined = path.join(parsed.dir, parsed.name);
-      acc[relPath] = {
-        path: pathJoined,
-      };
-      return acc;
-    },
-    {} as NonNullable<ViteVercelPrerenderRoute>,
-  );
+  return {};
 }
 
 async function getStaticHtmlFiles(src: string) {
@@ -450,12 +493,9 @@ async function getStaticHtmlFiles(src: string) {
   return htmlFiles;
 }
 
-export default function allPlugins(pluginConfig: ViteVercelConfig): PluginOption[] {
-  return [disableChunks(), vercelPlugin(pluginConfig)];
-}
-
 // @vercel/routing-utils respects path-to-regexp syntax
 function entryToPathtoregex(entry: ViteVercelEntry) {
+  assert(typeof entry.route !== "string", "Do not pass entry with route string to entryToPathtoregex");
   return path.posix
     .resolve("/", entry.destination)
     .split("/")
@@ -467,4 +507,8 @@ function entryToPathtoregex(entry: ViteVercelEntry) {
         .replace(/^\[([^/]+)\]$/g, ":$1"),
     )
     .join("/");
+}
+
+export default function allPlugins(pluginConfig: ViteVercelConfig): PluginOption[] {
+  return [vercelCleanupPlugin(), wasmPlugin(), vercelPlugin(pluginConfig), bundlePlugin(pluginConfig)];
 }
